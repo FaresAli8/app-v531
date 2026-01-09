@@ -1,0 +1,111 @@
+name: AI Android Advanced Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildType:
+        description: "Build type (debug or release)"
+        required: true
+        default: "debug"
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GRADLE_VERSION: 8.5
+      JAVA_VERSION: "17"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------- Java ----------
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # ---------- Android ----------
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ---------- Find Root (Fail-Safe Strategy) ----------
+      - name: Find project root
+        id: findroot
+        run: |
+          # Find gradlew to determine project root
+          ROOT=$(find . -maxdepth 3 -type f -name gradlew -print -quit | xargs -r dirname)
+          if [ -z "$ROOT" ]; then
+            ROOT="."
+          fi
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
+          echo "Using root: $ROOT"
+
+      # ---------- Gradle Wrapper (Fail-Safe Generation) ----------
+      - name: Ensure Gradle Wrapper
+        working-directory: ${{ steps.findroot.outputs.root }}
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            echo "gradlew not found, generating wrapper..."
+            sudo apt-get update
+            sudo apt-get install -y gradle
+            gradle wrapper --gradle-version 8.5
+          fi
+          chmod +x ./gradlew
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      # ---------- gradle.properties safety ----------
+      - name: Ensure gradle.properties
+        working-directory: ${{ steps.findroot.outputs.root }}
+        run: |
+          if [ ! -f "gradle.properties" ]; then
+            echo "Creating gradle.properties"
+            cat <<EOF > gradle.properties
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+          fi
+
+      # ---------- Icon fallback ----------
+      - name: Ensure launcher icon
+        working-directory: ${{ steps.findroot.outputs.root }}
+        run: |
+          ICON="app/src/main/res/drawable/ic_launcher.xml"
+          # Ensure directory exists
+          mkdir -p $(dirname "$ICON")
+          if [ ! -f "$ICON" ]; then
+            echo "Creating fallback launcher icon"
+            cat <<EOF > $ICON
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#3DDC84" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M54,54m-20,0a20,20 0 1,1 40,0a20,20 0 1,1 -40,0"/>
+          </vector>
+          EOF
+          fi
+
+      # ---------- Licenses ----------
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      # ---------- Build ----------
+      - name: Build Debug APK
+        working-directory: ${{ steps.findroot.outputs.root }}
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --info
+
+      # ---------- Upload ----------
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.event.inputs.buildType || 'debug' }}
+          path: ${{ steps.findroot.outputs.root }}/app/build/outputs/apk/**/*.apk
